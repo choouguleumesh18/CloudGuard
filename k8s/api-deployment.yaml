@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: cloudguard-api, namespace: cloudguard}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: cloudguard-api}}
+  template:
+    metadata:
+      labels:
+        app: cloudguard-api
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: cloudguard-automation
+      securityContext: {runAsNonRoot: true, runAsUser: 10001}
+      containers:
+        - name: api
+          image: YOUR_REGISTRY/cloudguard:VERSION
+          ports: [{containerPort: 8000}]
+          envFrom: [{secretRef: {name: cloudguard-config}}]
+          readinessProbe: {httpGet: {path: /api/v1/health, port: 8000}, initialDelaySeconds: 10, periodSeconds: 10}
+          livenessProbe: {httpGet: {path: /api/v1/health, port: 8000}, initialDelaySeconds: 20, periodSeconds: 20}
+          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 768Mi}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: cloudguard-api, namespace: cloudguard}
+spec:
+  selector: {app: cloudguard-api}
+  ports: [{port: 80, targetPort: 8000}]

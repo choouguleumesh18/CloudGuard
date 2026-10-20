@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cloudguard
+      POSTGRES_USER: cloudguard_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
+    ports: ["5433:5432"]
+    volumes: ["cloudguard-postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudguard_user -d cloudguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://cloudguard_user:${POSTGRES_PASSWORD:-123456}@postgres:5432/cloudguard
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+volumes:
+  cloudguard-postgres:

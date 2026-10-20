@@ -1,0 +1,26 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata: {name: cloudguard-scheduled-scan, namespace: cloudguard}
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: scheduled-scan
+              image: YOUR_REGISTRY/cloudguard:VERSION
+              command: ["python", "-m", "cloudguard.cli", "scan", "--subscription-id", "$(AZURE_DEFAULT_SUBSCRIPTION_ID)"]
+              envFrom: [{secretRef: {name: cloudguard-config}}]
+              env:
+                - name: CLOUDGUARD_URL
+                  value: "http://cloudguard-api"
+                - name: CLOUDGUARD_USERNAME
+                  valueFrom: {secretKeyRef: {name: cloudguard-config, key: AUTOMATION_USERNAME}}
+                - name: CLOUDGUARD_PASSWORD
+                  valueFrom: {secretKeyRef: {name: cloudguard-config, key: AUTOMATION_PASSWORD}}

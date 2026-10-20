@@ -1,0 +1,67 @@
+name: CloudGuard staging AKS deploy
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Build and push immutable image
+        env:
+          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          az acr login --name "$ACR_NAME"
+          docker build -t "$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA" .
+          docker push "$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
+      - name: Configure AKS context
+        env:
+          AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+        run: |
+          az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing
+      - name: Apply staging configuration and deploy
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+          AUTOMATION_USERNAME: ${{ secrets.AUTOMATION_USERNAME }}
+          AUTOMATION_PASSWORD: ${{ secrets.AUTOMATION_PASSWORD }}
+          AZURE_DEFAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RUNTIME_CLIENT_ID: ${{ secrets.AZURE_RUNTIME_CLIENT_ID }}
+          WORKER_IMAGE: ${{ secrets.ACR_LOGIN_SERVER }}/cloudguard:${{ github.sha }}
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl -n cloudguard create secret generic cloudguard-config \
+            --from-literal=DATABASE_URL="$DATABASE_URL" \
+            --from-literal=JWT_SECRET="$JWT_SECRET" \
+            --from-literal=BOOTSTRAP_ADMIN_PASSWORD="$BOOTSTRAP_ADMIN_PASSWORD" \
+            --from-literal=AZURE_MODE=azure \
+            --from-literal=AZURE_DEFAULT_SUBSCRIPTION_ID="$AZURE_DEFAULT_SUBSCRIPTION_ID" \
+            --from-literal=EXECUTION_MODE=kubernetes \
+            --from-literal=AUTO_CREATE_SCHEMA=false \
+            --from-literal=WORKER_IMAGE="$WORKER_IMAGE" \
+            --from-literal=AUTOMATION_USERNAME="$AUTOMATION_USERNAME" \
+            --from-literal=AUTOMATION_PASSWORD="$AUTOMATION_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -f k8s/service-account.yaml
+          kubectl -n cloudguard annotate serviceaccount cloudguard-automation azure.workload.identity/client-id="$AZURE_RUNTIME_CLIENT_ID" --overwrite
+          kubectl apply -f k8s/job-rbac.yaml
+          kubectl delete job cloudguard-migrations -n cloudguard --ignore-not-found
+          sed "s#YOUR_REGISTRY/cloudguard:VERSION#$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA#g" k8s/migration-job.yaml | kubectl apply -f -
+          kubectl -n cloudguard wait --for=condition=complete job/cloudguard-migrations --timeout=180s
+          kubectl apply -f k8s/api-deployment.yaml
+          kubectl apply -f k8s/scan-cronjob.yaml
+          kubectl -n cloudguard set image deployment/cloudguard-api api="$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
+          kubectl -n cloudguard set image cronjob/cloudguard-scheduled-scan scheduled-scan="$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
+          kubectl -n cloudguard rollout status deployment/cloudguard-api --timeout=180s

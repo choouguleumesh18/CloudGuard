@@ -1,0 +1,38 @@
+name: CloudGuard CI
+on:
+  push:
+    branches: [main, dev, "feature/**"]
+  pull_request:
+    branches: [main, dev]
+permissions:
+  contents: read
+  packages: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_USER: cloudguard_user, POSTGRES_PASSWORD: test_password, POSTGRES_DB: cloudguard}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cloudguard_user -d cloudguard"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+psycopg://cloudguard_user:test_password@localhost:5432/cloudguard
+      JWT_SECRET: ci-only-secret-not-for-production
+      BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password-123!
+      AZURE_MODE: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12", cache: pip}
+      - run: pip install -r requirements.txt
+      - run: ruff check src tests --select F,E9
+      - run: python -m compileall -q src
+      - run: mypy src/cloudguard --ignore-missing-imports --follow-imports=skip
+      - run: pytest --cov=cloudguard.rules --cov=cloudguard.services.remediation_service --cov-fail-under=80
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with: {context: ., push: false, tags: cloudguard:ci}
+  # CD is intentionally a separate opt-in workflow so an ordinary PR cannot deploy to Azure.
