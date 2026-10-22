@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cloudguard-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test and Build
@@ -37,6 +41,7 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+          --health-start-period 5s
 
     env:
       DATABASE_URL: postgresql+psycopg://cloudguard_user:test_password@localhost:5432/cloudguard
@@ -45,38 +50,71 @@ jobs:
       AZURE_MODE: mock
 
     steps:
+      # ------------------------------------------------------------
+      # 1. Download the repository source code
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # 2. Install Python 3.12
+      # ------------------------------------------------------------
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: requirements.txt
 
+      # ------------------------------------------------------------
+      # 3. Install application and CI dependencies
+      # ------------------------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
-      # - name: Run Ruff lint checks
-      #   run: ruff check src tests --select F,E9
+      # ------------------------------------------------------------
+      # 4. Check for undefined names, unused imports and serious
+      #    Python syntax problems
+      # ------------------------------------------------------------
+      - name: Run Ruff lint checks
+        run: |
+          ruff check src tests --select F,E9
 
+      # ------------------------------------------------------------
+      # 5. Verify that Python can compile the source files
+      # ------------------------------------------------------------
       - name: Compile Python source
-        run: python -m compileall -q src
+        run: |
+          python -m compileall -q src
 
+      # ------------------------------------------------------------
+      # 6. Run static type checking
+      # ------------------------------------------------------------
       - name: Run mypy type checks
         run: |
           mypy src/cloudguard \
             --ignore-missing-imports \
             --follow-imports=skip
 
+      # ------------------------------------------------------------
+      # 7. Apply all Alembic migrations to the temporary CI database
+      # ------------------------------------------------------------
       - name: Run Alembic database migrations
-        run: alembic upgrade head
+        run: |
+          alembic upgrade head
 
+      # ------------------------------------------------------------
+      # 8. Display and verify the current database revision
+      # ------------------------------------------------------------
       - name: Verify Alembic migration
-        run: alembic current
+        run: |
+          alembic current --check-heads
 
+      # ------------------------------------------------------------
+      # 9. Execute tests and enforce minimum 80% coverage
+      # ------------------------------------------------------------
       - name: Run tests with coverage
         run: |
           pytest \
@@ -85,17 +123,25 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=80
 
+      # ------------------------------------------------------------
+      # 10. Configure Docker Buildx
+      # ------------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # ------------------------------------------------------------
+      # 11. Build the Docker image without pushing it
+      # ------------------------------------------------------------
       - name: Build CloudGuard Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: false
-          tags: cloudguard:ci
           load: false
+          tags: cloudguard:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-  # CD should remain in a separate, opt-in workflow so that
-  # ordinary pull requests cannot deploy to Azure.
+  # CD remains in a separate manually triggered workflow.
+  # A normal push or pull request cannot deploy to Azure or AKS.
