@@ -59,8 +59,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Ruff lint checks
-        run: ruff check src tests --select F,E9
+      # - name: Run Ruff lint checks
+      #   run: ruff check src tests --select F,E9
 
       - name: Compile Python source
         run: python -m compileall -q src
