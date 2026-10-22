@@ -1,38 +1,101 @@
 name: CloudGuard CI
+
 on:
   push:
-    branches: [main, dev, "feature/**"]
+    branches:
+      - main
+      - dev
+      - "feature/**"
+
   pull_request:
-    branches: [main, dev]
+    branches:
+      - main
+      - dev
+
 permissions:
   contents: read
-  packages: write
+
 jobs:
   test:
+    name: Test and Build
     runs-on: ubuntu-latest
+
     services:
       postgres:
         image: postgres:16
-        env: {POSTGRES_USER: cloudguard_user, POSTGRES_PASSWORD: test_password, POSTGRES_DB: cloudguard}
-        ports: ["5432:5432"]
+
+        env:
+          POSTGRES_USER: cloudguard_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: cloudguard
+
+        ports:
+          - "5432:5432"
+
         options: >-
           --health-cmd "pg_isready -U cloudguard_user -d cloudguard"
-          --health-interval 5s --health-timeout 3s --health-retries 10
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     env:
       DATABASE_URL: postgresql+psycopg://cloudguard_user:test_password@localhost:5432/cloudguard
       JWT_SECRET: ci-only-secret-not-for-production
       BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password-123!
       AZURE_MODE: mock
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: {python-version: "3.12", cache: pip}
-      - run: pip install -r requirements.txt
-      - run: ruff check src tests --select F,E9
-      - run: python -m compileall -q src
-      - run: mypy src/cloudguard --ignore-missing-imports --follow-imports=skip
-      - run: pytest --cov=cloudguard.rules --cov=cloudguard.services.remediation_service --cov-fail-under=80
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with: {context: ., push: false, tags: cloudguard:ci}
-  # CD is intentionally a separate opt-in workflow so an ordinary PR cannot deploy to Azure.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Ruff lint checks
+        run: ruff check src tests --select F,E9
+
+      - name: Compile Python source
+        run: python -m compileall -q src
+
+      - name: Run mypy type checks
+        run: |
+          mypy src/cloudguard \
+            --ignore-missing-imports \
+            --follow-imports=skip
+
+      - name: Run Alembic database migrations
+        run: alembic upgrade head
+
+      - name: Verify Alembic migration
+        run: alembic current
+
+      - name: Run tests with coverage
+        run: |
+          pytest \
+            --cov=cloudguard.rules \
+            --cov=cloudguard.services.remediation_service \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CloudGuard Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: cloudguard:ci
+          load: false
+
+  # CD should remain in a separate, opt-in workflow so that
+  # ordinary pull requests cannot deploy to Azure.
