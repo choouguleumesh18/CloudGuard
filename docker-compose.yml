@@ -5,20 +5,50 @@ services:
       POSTGRES_DB: cloudguard
       POSTGRES_USER: cloudguard_user
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-123456}
-    ports: ["5433:5432"]
-    volumes: ["cloudguard-postgres:/var/lib/postgresql/data"]
+
+    ports:
+      - "5433:5432"
+
+    volumes:
+      - cloudguard-postgres:/var/lib/postgresql/data
+
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U cloudguard_user -d cloudguard"]
+      test:
+        - CMD-SHELL
+        - pg_isready -U cloudguard_user -d cloudguard
       interval: 5s
       timeout: 3s
       retries: 20
+      start_period: 10s
+
+    restart: unless-stopped
+
   api:
-    build: .
-    env_file: .env
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
     environment:
       DATABASE_URL: postgresql+psycopg://cloudguard_user:${POSTGRES_PASSWORD:-123456}@postgres:5432/cloudguard
-    ports: ["8000:8000"]
+
+    ports:
+      - "8000:8000"
+
     depends_on:
-      postgres: {condition: service_healthy}
+      postgres:
+        condition: service_healthy
+
+    command:
+      - /bin/sh
+      - -c
+      - |
+        alembic upgrade head &&
+        exec uvicorn cloudguard.main:app --host 0.0.0.0 --port 8000
+
+    restart: unless-stopped
+
 volumes:
   cloudguard-postgres:
