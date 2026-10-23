@@ -1,27 +1,19 @@
-name: CloudGuard CI
+name: CloudGuard CI - Manual
 
 on:
-  push:
-    branches:
-      - main
-      - dev
-      - "feature/**"
-
-  pull_request:
-    branches:
-      - main
-      - dev
+  workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: cloudguard-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test and Build
+  test-build-push:
+    name: Test, Build and Push to ACR
     runs-on: ubuntu-latest
 
     services:
@@ -48,16 +40,17 @@ jobs:
       JWT_SECRET: ci-only-secret-not-for-production
       BOOTSTRAP_ADMIN_PASSWORD: ci-only-strong-password-123!
       AZURE_MODE: mock
+      IMAGE_REPOSITORY: cloudguard
 
     steps:
       # ------------------------------------------------------------
-      # 1. Download the repository source code
+      # 1. Checkout the selected branch
       # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # ------------------------------------------------------------
-      # 2. Install Python 3.12
+      # 2. Set up Python 3.12
       # ------------------------------------------------------------
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
@@ -75,22 +68,21 @@ jobs:
           python -m pip install -r requirements.txt
 
       # ------------------------------------------------------------
-      # 4. Check for undefined names, unused imports and serious
-      #    Python syntax problems
+      # 4. Check undefined names, imports and syntax problems
       # ------------------------------------------------------------
       - name: Run Ruff lint checks
         run: |
           ruff check src tests --select F,E9
 
       # ------------------------------------------------------------
-      # 5. Verify that Python can compile the source files
+      # 5. Verify that the Python source can compile
       # ------------------------------------------------------------
       - name: Compile Python source
         run: |
           python -m compileall -q src
 
       # ------------------------------------------------------------
-      # 6. Run static type checking
+      # 6. Run static type checks
       # ------------------------------------------------------------
       - name: Run mypy type checks
         run: |
@@ -99,21 +91,21 @@ jobs:
             --follow-imports=skip
 
       # ------------------------------------------------------------
-      # 7. Apply all Alembic migrations to the temporary CI database
+      # 7. Apply Alembic migrations to temporary PostgreSQL
       # ------------------------------------------------------------
       - name: Run Alembic database migrations
         run: |
           alembic upgrade head
 
       # ------------------------------------------------------------
-      # 8. Display and verify the current database revision
+      # 8. Confirm that the database reached Alembic head
       # ------------------------------------------------------------
       - name: Verify Alembic migration
         run: |
           alembic current --check-heads
 
       # ------------------------------------------------------------
-      # 9. Execute tests and enforce minimum 80% coverage
+      # 9. Run tests and enforce minimum 80% coverage
       # ------------------------------------------------------------
       - name: Run tests with coverage
         run: |
@@ -124,24 +116,53 @@ jobs:
             --cov-fail-under=80
 
       # ------------------------------------------------------------
-      # 10. Configure Docker Buildx
+      # 10. Configure Docker Buildx/BuildKit
       # ------------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       # ------------------------------------------------------------
-      # 11. Build the Docker image without pushing it
+      # 11. Authenticate to Azure using GitHub OIDC
       # ------------------------------------------------------------
-      - name: Build CloudGuard Docker image
+      - name: Login to Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # ------------------------------------------------------------
+      # 12. Authenticate Docker to Azure Container Registry
+      # ------------------------------------------------------------
+      - name: Login to Azure Container Registry
+        env:
+          ACR_NAME: ${{ secrets.ACR_NAME }}
+        run: |
+          az acr login --name "$ACR_NAME"
+
+      # ------------------------------------------------------------
+      # 13. Build and push the Docker image to ACR
+      #
+      # Result:
+      # cloudguardacr2026.azurecr.io/cloudguard:<commit-sha>
+      # ------------------------------------------------------------
+      - name: Build and push CloudGuard image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          push: false
-          load: false
-          tags: cloudguard:${{ github.sha }}
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/cloudguard:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # CD remains in a separate manually triggered workflow.
-  # A normal push or pull request cannot deploy to Azure or AKS.
+      # ------------------------------------------------------------
+      # 14. Display the published image address
+      # ------------------------------------------------------------
+      - name: Display published image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          echo "CloudGuard image successfully pushed."
+          echo "Image: $ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
