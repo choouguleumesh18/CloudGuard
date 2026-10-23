@@ -5,6 +5,7 @@ sqlalchemy>=2.0,<3.0
 psycopg[binary]>=3.2,<4.0
 alembic>=1.13,<2.0
 PyJWT>=2.9,<3.0
+isort == 6.0.0
 azure-identity>=1.17,<2.0
 azure-mgmt-resource>=23.0,<25.0
 azure-mgmt-network>=26.0,<30.0
