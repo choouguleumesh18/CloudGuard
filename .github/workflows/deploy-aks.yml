@@ -54,7 +54,7 @@ jobs:
       - name: Set up kubelogin
         uses: azure/use-kubelogin@v1
         with:
-          kubelogin-version: latest
+          kubelogin-version: "v0.2.12"
 
       # ------------------------------------------------------------
       # 4. Login to Azure using GitHub OIDC
