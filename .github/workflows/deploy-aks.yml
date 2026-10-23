@@ -21,7 +21,7 @@ jobs:
   deploy:
     name: Deploy CloudGuard to AKS
 
-    # Deploy only if CloudGuard CI completed successfully on main.
+    # Deploy only when CloudGuard CI succeeds on main.
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
@@ -67,7 +67,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # ------------------------------------------------------------
-      # 5. Display selected commit, image and AKS cluster
+      # 5. Display selected commit, image and cluster
       # ------------------------------------------------------------
       - name: Display deployment selection
         env:
@@ -84,7 +84,7 @@ jobs:
           echo "Image: $ACR_LOGIN_SERVER/cloudguard:$IMAGE_TAG"
 
       # ------------------------------------------------------------
-      # 6. Verify that the exact CI image exists in ACR
+      # 6. Verify the exact CI image exists in ACR
       # ------------------------------------------------------------
       - name: Verify image exists in ACR
         env:
@@ -104,8 +104,8 @@ jobs:
       # ------------------------------------------------------------
       # 7. Verify AKS is running
       #
-      # This workflow does not start AKS automatically to avoid
-      # unexpected PAYG compute usage.
+      # CD does not start AKS automatically. This prevents
+      # unexpected Pay-As-You-Go compute usage.
       # ------------------------------------------------------------
       - name: Verify AKS power state
         env:
@@ -124,7 +124,7 @@ jobs:
 
           if [ "$POWER_STATE" != "Running" ]; then
             echo "AKS cluster is not running."
-            echo "Start aks-cloudguard-dev in the Azure Portal, then rerun this CD workflow."
+            echo "Start aks-cloudguard-dev in Azure Portal, then rerun this workflow."
             exit 1
           fi
 
@@ -149,7 +149,7 @@ jobs:
           kubectl get nodes
 
       # ------------------------------------------------------------
-      # 9. Create or update the CloudGuard namespace
+      # 9. Create or update CloudGuard namespace
       # ------------------------------------------------------------
       - name: Create CloudGuard namespace
         run: |
@@ -204,7 +204,7 @@ jobs:
           echo "PostgreSQL is ready."
 
       # ------------------------------------------------------------
-      # 12. Show PostgreSQL resources
+      # 12. Display PostgreSQL resources
       # ------------------------------------------------------------
       - name: Verify PostgreSQL status
         run: |
@@ -249,7 +249,7 @@ jobs:
             --output=yaml | kubectl apply -f -
 
       # ------------------------------------------------------------
-      # 14. Create the CloudGuard Kubernetes ServiceAccount
+      # 14. Create CloudGuard Kubernetes ServiceAccount
       # ------------------------------------------------------------
       - name: Create CloudGuard ServiceAccount
         run: |
@@ -258,7 +258,7 @@ jobs:
           kubectl apply -f k8s/service-account.yaml
 
       # ------------------------------------------------------------
-      # 15. Connect the ServiceAccount to Workload Identity
+      # 15. Connect ServiceAccount to Azure Workload Identity
       # ------------------------------------------------------------
       - name: Configure CloudGuard Workload Identity
         env:
@@ -279,7 +279,7 @@ jobs:
           echo "CloudGuard Workload Identity ServiceAccount configured."
 
       # ------------------------------------------------------------
-      # 16. Apply CloudGuard namespace-level Kubernetes RBAC
+      # 16. Apply CloudGuard namespace Kubernetes RBAC
       # ------------------------------------------------------------
       - name: Apply CloudGuard Kubernetes RBAC
         run: |
@@ -288,10 +288,9 @@ jobs:
           kubectl apply -f k8s/job-rbac.yaml
 
       # ------------------------------------------------------------
-      # 17. Remove the previous migration Job
+      # 17. Remove previous migration Job
       #
-      # Jobs cannot be updated in place because their pod templates
-      # are immutable.
+      # Kubernetes Job pod templates cannot be updated in place.
       # ------------------------------------------------------------
       - name: Remove previous migration Job
         run: |
@@ -302,7 +301,7 @@ jobs:
             --ignore-not-found=true
 
       # ------------------------------------------------------------
-      # 18. Run Alembic migrations with the exact CI image
+      # 18. Run Alembic migrations using the exact CI image
       # ------------------------------------------------------------
       - name: Run database migrations
         env:
@@ -336,6 +335,7 @@ jobs:
 
             if [ -n "$MIGRATION_POD" ]; then
               kubectl -n cloudguard describe pod "$MIGRATION_POD" || true
+
               kubectl -n cloudguard logs "$MIGRATION_POD" \
                 --all-containers=true \
                 --tail=200 || true
@@ -351,7 +351,7 @@ jobs:
             --all-containers=true
 
       # ------------------------------------------------------------
-      # 19. Deploy CloudGuard API with the exact CI image
+      # 19. Deploy CloudGuard API using the exact CI image
       # ------------------------------------------------------------
       - name: Deploy CloudGuard API
         env:
@@ -368,7 +368,7 @@ jobs:
             k8s/api-deployment.yaml | kubectl apply -f -
 
       # ------------------------------------------------------------
-      # 20. Deploy CloudGuard scheduled scan with the CI image
+      # 20. Deploy scheduled scan using the exact CI image
       # ------------------------------------------------------------
       - name: Deploy CloudGuard scheduled scan
         env:
@@ -385,7 +385,7 @@ jobs:
             k8s/scan-cronjob.yaml | kubectl apply -f -
 
       # ------------------------------------------------------------
-      # 21. Wait for the CloudGuard API rollout
+      # 21. Wait for CloudGuard API rollout
       # ------------------------------------------------------------
       - name: Verify CloudGuard API rollout
         run: |
@@ -407,6 +407,7 @@ jobs:
 
             if [ -n "$API_POD" ]; then
               kubectl -n cloudguard describe pod "$API_POD" || true
+
               kubectl -n cloudguard logs "$API_POD" \
                 --all-containers=true \
                 --tail=200 || true
@@ -418,7 +419,7 @@ jobs:
           echo "CloudGuard API rollout completed successfully."
 
       # ------------------------------------------------------------
-      # 22. Verify the API health endpoint inside Kubernetes
+      # 22. Verify API health inside Kubernetes
       # ------------------------------------------------------------
       - name: Verify CloudGuard API health
         run: |
@@ -447,8 +448,11 @@ jobs:
 
             echo "CloudGuard API health check failed."
 
-            kubectl -n cloudguard describe pod cloudguard-health-check || true
-            kubectl -n cloudguard logs cloudguard-health-check || true
+            kubectl -n cloudguard describe pod \
+              cloudguard-health-check || true
+
+            kubectl -n cloudguard logs \
+              cloudguard-health-check || true
 
             exit 1
           fi
@@ -462,7 +466,7 @@ jobs:
           echo "CloudGuard API health check passed."
 
       # ------------------------------------------------------------
-      # 23. Display the final deployment state
+      # 23. Display final deployment status
       # ------------------------------------------------------------
       - name: Display deployment status
         env:
@@ -471,7 +475,8 @@ jobs:
           echo "=================================================="
           echo "CloudGuard deployment completed"
           echo "=================================================="
-          echo "CI Run ID:"
+          echo
+          echo "CI workflow run:"
           echo "${{ github.event.workflow_run.id }}"
           echo
           echo "Image:"
