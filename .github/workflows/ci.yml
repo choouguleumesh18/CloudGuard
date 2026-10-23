@@ -1,4 +1,4 @@
-name: CloudGuard CI - Manual
+name: CloudGuard CI
 
 on:
   workflow_dispatch:
