@@ -21,7 +21,7 @@ jobs:
   deploy:
     name: Deploy CloudGuard to AKS
 
-    # Deploy only when CloudGuard CI succeeds on main.
+    # Deploy only after CloudGuard CI succeeds on main.
     if: >
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
@@ -49,12 +49,14 @@ jobs:
       # ------------------------------------------------------------
       # 3. Install kubelogin
       #
-      # Required because AKS uses Microsoft Entra ID authentication.
+      # GITHUB_TOKEN is required when resolving the latest version.
       # ------------------------------------------------------------
       - name: Set up kubelogin
         uses: azure/use-kubelogin@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         with:
-          kubelogin-version: "v0.2.12"
+          kubelogin-version: "latest"
 
       # ------------------------------------------------------------
       # 4. Login to Azure using GitHub OIDC
@@ -67,7 +69,7 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       # ------------------------------------------------------------
-      # 5. Display selected commit, image and cluster
+      # 5. Display selected commit, image and AKS cluster
       # ------------------------------------------------------------
       - name: Display deployment selection
         env:
@@ -104,8 +106,8 @@ jobs:
       # ------------------------------------------------------------
       # 7. Verify AKS is running
       #
-      # CD does not start AKS automatically. This prevents
-      # unexpected Pay-As-You-Go compute usage.
+      # CD does not start AKS automatically to avoid unexpected
+      # Pay-As-You-Go compute usage.
       # ------------------------------------------------------------
       - name: Verify AKS power state
         env:
@@ -124,7 +126,7 @@ jobs:
 
           if [ "$POWER_STATE" != "Running" ]; then
             echo "AKS cluster is not running."
-            echo "Start aks-cloudguard-dev in Azure Portal, then rerun this workflow."
+            echo "Start aks-cloudguard-dev in Azure Portal, then run CI again."
             exit 1
           fi
 
