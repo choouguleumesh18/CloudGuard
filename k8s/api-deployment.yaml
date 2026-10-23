@@ -1,29 +1,101 @@
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: cloudguard-api, namespace: cloudguard}
+metadata:
+  name: cloudguard-api
+  namespace: cloudguard
+  labels:
+    app: cloudguard-api
 spec:
   replicas: 1
-  selector: {matchLabels: {app: cloudguard-api}}
+
+  revisionHistoryLimit: 2
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+
+  selector:
+    matchLabels:
+      app: cloudguard-api
+
   template:
     metadata:
       labels:
         app: cloudguard-api
         azure.workload.identity/use: "true"
+
     spec:
       serviceAccountName: cloudguard-automation
-      securityContext: {runAsNonRoot: true, runAsUser: 10001}
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: api
           image: YOUR_REGISTRY/cloudguard:VERSION
-          ports: [{containerPort: 8000}]
-          envFrom: [{secretRef: {name: cloudguard-config}}]
-          readinessProbe: {httpGet: {path: /api/v1/health, port: 8000}, initialDelaySeconds: 10, periodSeconds: 10}
-          livenessProbe: {httpGet: {path: /api/v1/health, port: 8000}, initialDelaySeconds: 20, periodSeconds: 20}
-          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 1000m, memory: 768Mi}}
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+
+          envFrom:
+            - secretRef:
+                name: cloudguard-config
+
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 750m
+              memory: 768Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: cloudguard-api, namespace: cloudguard}
+metadata:
+  name: cloudguard-api
+  namespace: cloudguard
+  labels:
+    app: cloudguard-api
 spec:
-  selector: {app: cloudguard-api}
-  ports: [{port: 80, targetPort: 8000}]
+  type: ClusterIP
+
+  selector:
+    app: cloudguard-api
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

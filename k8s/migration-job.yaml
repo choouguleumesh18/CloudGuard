@@ -3,21 +3,52 @@ kind: Job
 metadata:
   name: cloudguard-migrations
   namespace: cloudguard
+  labels:
+    app: cloudguard-migrations
 spec:
-  backoffLimit: 0
+  backoffLimit: 2
   ttlSecondsAfterFinished: 86400
+
   template:
     metadata:
       labels:
         app: cloudguard-migrations
         azure.workload.identity/use: "true"
+
     spec:
       restartPolicy: Never
       serviceAccountName: cloudguard-automation
-      securityContext: {runAsNonRoot: true, runAsUser: 10001}
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
       containers:
         - name: migrations
           image: YOUR_REGISTRY/cloudguard:VERSION
-          command: ["alembic", "upgrade", "head"]
-          envFrom: [{secretRef: {name: cloudguard-config}}]
-          resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {cpu: 500m, memory: 512Mi}}
+          imagePullPolicy: IfNotPresent
+
+          command:
+            - alembic
+            - upgrade
+            - head
+
+          envFrom:
+            - secretRef:
+                name: cloudguard-config
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
