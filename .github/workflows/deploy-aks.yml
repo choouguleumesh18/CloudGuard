@@ -1,67 +1,510 @@
-name: CloudGuard staging AKS deploy
+name: CloudGuard CD - Deploy to AKS
+
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - "CloudGuard CI"
+    types:
+      - completed
+    branches:
+      - main
+
 permissions:
   contents: read
   id-token: write
+
+concurrency:
+  group: cloudguard-aks-deployment
+  cancel-in-progress: false
+
 jobs:
   deploy:
+    name: Deploy CloudGuard to AKS
+
+    # Deploy only if CloudGuard CI completed successfully on main.
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+
     runs-on: ubuntu-latest
-    environment: staging
+
+    env:
+      IMAGE_TAG: ${{ github.event.workflow_run.head_sha }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v2
+      # ------------------------------------------------------------
+      # 1. Checkout the exact commit successfully tested by CI
+      # ------------------------------------------------------------
+      - name: Checkout tested commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # ------------------------------------------------------------
+      # 2. Install kubectl
+      # ------------------------------------------------------------
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      # ------------------------------------------------------------
+      # 3. Install kubelogin
+      #
+      # Required because AKS uses Microsoft Entra ID authentication.
+      # ------------------------------------------------------------
+      - name: Set up kubelogin
+        uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: latest
+
+      # ------------------------------------------------------------
+      # 4. Login to Azure using GitHub OIDC
+      # ------------------------------------------------------------
+      - name: Login to Azure
+        uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - name: Build and push immutable image
+
+      # ------------------------------------------------------------
+      # 5. Display selected commit, image and AKS cluster
+      # ------------------------------------------------------------
+      - name: Display deployment selection
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+
+          echo "CI workflow run ID: ${{ github.event.workflow_run.id }}"
+          echo "CI conclusion: ${{ github.event.workflow_run.conclusion }}"
+          echo "Source branch: ${{ github.event.workflow_run.head_branch }}"
+          echo "Commit SHA: $IMAGE_TAG"
+          echo "AKS cluster: $AKS_CLUSTER_NAME"
+          echo "Image: $ACR_LOGIN_SERVER/cloudguard:$IMAGE_TAG"
+
+      # ------------------------------------------------------------
+      # 6. Verify that the exact CI image exists in ACR
+      # ------------------------------------------------------------
+      - name: Verify image exists in ACR
         env:
           ACR_NAME: ${{ secrets.ACR_NAME }}
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          az acr login --name "$ACR_NAME"
-          docker build -t "$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA" .
-          docker push "$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
+          set -euo pipefail
+
+          echo "Checking cloudguard:$IMAGE_TAG in ACR..."
+
+          az acr repository show \
+            --name "$ACR_NAME" \
+            --image "cloudguard:$IMAGE_TAG" \
+            --output none
+
+          echo "The CI image exists in ACR."
+
+      # ------------------------------------------------------------
+      # 7. Verify AKS is running
+      #
+      # This workflow does not start AKS automatically to avoid
+      # unexpected PAYG compute usage.
+      # ------------------------------------------------------------
+      - name: Verify AKS power state
+        env:
+          AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
+          AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
+        run: |
+          set -euo pipefail
+
+          POWER_STATE=$(az aks show \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
+            --query "powerState.code" \
+            --output tsv)
+
+          echo "AKS power state: $POWER_STATE"
+
+          if [ "$POWER_STATE" != "Running" ]; then
+            echo "AKS cluster is not running."
+            echo "Start aks-cloudguard-dev in the Azure Portal, then rerun this CD workflow."
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # 8. Obtain AKS credentials and configure kubectl
+      # ------------------------------------------------------------
       - name: Configure AKS context
         env:
           AKS_RESOURCE_GROUP: ${{ secrets.AKS_RESOURCE_GROUP }}
           AKS_CLUSTER_NAME: ${{ secrets.AKS_CLUSTER_NAME }}
         run: |
-          az aks get-credentials --resource-group "$AKS_RESOURCE_GROUP" --name "$AKS_CLUSTER_NAME" --overwrite-existing
-      - name: Apply staging configuration and deploy
+          set -euo pipefail
+
+          az aks get-credentials \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+          kubelogin convert-kubeconfig -l azurecli
+
+          kubectl cluster-info
+          kubectl get nodes
+
+      # ------------------------------------------------------------
+      # 9. Create or update the CloudGuard namespace
+      # ------------------------------------------------------------
+      - name: Create CloudGuard namespace
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/namespace.yaml
+
+      # ------------------------------------------------------------
+      # 10. Create or update PostgreSQL credentials
+      # ------------------------------------------------------------
+      - name: Create PostgreSQL Kubernetes Secret
         env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          POSTGRES_DB: cloudguard
+          POSTGRES_USER: cloudguard_user
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          kubectl -n cloudguard create secret generic postgres-config \
+            --from-literal=POSTGRES_DB="$POSTGRES_DB" \
+            --from-literal=POSTGRES_USER="$POSTGRES_USER" \
+            --from-literal=POSTGRES_PASSWORD="$POSTGRES_PASSWORD" \
+            --dry-run=client \
+            --output=yaml | kubectl apply -f -
+
+      # ------------------------------------------------------------
+      # 11. Deploy PostgreSQL inside AKS
+      # ------------------------------------------------------------
+      - name: Deploy PostgreSQL
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/postgres.yaml
+
+          if ! kubectl -n cloudguard rollout status \
+            statefulset/postgres \
+            --timeout=300s; then
+
+            echo "PostgreSQL deployment failed or timed out."
+
+            kubectl -n cloudguard get pods -o wide || true
+            kubectl -n cloudguard get pvc || true
+            kubectl -n cloudguard describe statefulset postgres || true
+            kubectl -n cloudguard describe pods -l app=postgres || true
+            kubectl -n cloudguard logs statefulset/postgres \
+              --all-containers=true \
+              --tail=200 || true
+
+            exit 1
+          fi
+
+          echo "PostgreSQL is ready."
+
+      # ------------------------------------------------------------
+      # 12. Show PostgreSQL resources
+      # ------------------------------------------------------------
+      - name: Verify PostgreSQL status
+        run: |
+          set -euo pipefail
+
+          kubectl -n cloudguard get statefulset postgres
+          kubectl -n cloudguard get pods -l app=postgres -o wide
+          kubectl -n cloudguard get service postgres
+          kubectl -n cloudguard get pvc
+
+      # ------------------------------------------------------------
+      # 13. Create or update CloudGuard application configuration
+      # ------------------------------------------------------------
+      - name: Create CloudGuard Kubernetes Secret
+        env:
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           JWT_SECRET: ${{ secrets.JWT_SECRET }}
           BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
           AUTOMATION_USERNAME: ${{ secrets.AUTOMATION_USERNAME }}
           AUTOMATION_PASSWORD: ${{ secrets.AUTOMATION_PASSWORD }}
-          AZURE_DEFAULT_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_RUNTIME_CLIENT_ID: ${{ secrets.AZURE_RUNTIME_CLIENT_ID }}
-          WORKER_IMAGE: ${{ secrets.ACR_LOGIN_SERVER }}/cloudguard:${{ github.sha }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          kubectl apply -f k8s/namespace.yaml
+          set -euo pipefail
+
+          DATABASE_URL="postgresql+psycopg://cloudguard_user:${POSTGRES_PASSWORD}@postgres:5432/cloudguard"
+          WORKER_IMAGE="${ACR_LOGIN_SERVER}/cloudguard:${IMAGE_TAG}"
+
           kubectl -n cloudguard create secret generic cloudguard-config \
             --from-literal=DATABASE_URL="$DATABASE_URL" \
+            --from-literal=DB_ECHO=false \
             --from-literal=JWT_SECRET="$JWT_SECRET" \
             --from-literal=BOOTSTRAP_ADMIN_PASSWORD="$BOOTSTRAP_ADMIN_PASSWORD" \
             --from-literal=AZURE_MODE=azure \
-            --from-literal=AZURE_DEFAULT_SUBSCRIPTION_ID="$AZURE_DEFAULT_SUBSCRIPTION_ID" \
+            --from-literal=AZURE_DEFAULT_SUBSCRIPTION_ID="$AZURE_SUBSCRIPTION_ID" \
             --from-literal=EXECUTION_MODE=kubernetes \
             --from-literal=AUTO_CREATE_SCHEMA=false \
             --from-literal=WORKER_IMAGE="$WORKER_IMAGE" \
             --from-literal=AUTOMATION_USERNAME="$AUTOMATION_USERNAME" \
             --from-literal=AUTOMATION_PASSWORD="$AUTOMATION_PASSWORD" \
-            --dry-run=client -o yaml | kubectl apply -f -
+            --dry-run=client \
+            --output=yaml | kubectl apply -f -
+
+      # ------------------------------------------------------------
+      # 14. Create the CloudGuard Kubernetes ServiceAccount
+      # ------------------------------------------------------------
+      - name: Create CloudGuard ServiceAccount
+        run: |
+          set -euo pipefail
+
           kubectl apply -f k8s/service-account.yaml
-          kubectl -n cloudguard annotate serviceaccount cloudguard-automation azure.workload.identity/client-id="$AZURE_RUNTIME_CLIENT_ID" --overwrite
+
+      # ------------------------------------------------------------
+      # 15. Connect the ServiceAccount to Workload Identity
+      # ------------------------------------------------------------
+      - name: Configure CloudGuard Workload Identity
+        env:
+          AZURE_RUNTIME_CLIENT_ID: ${{ secrets.AZURE_RUNTIME_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+
+          kubectl -n cloudguard annotate serviceaccount \
+            cloudguard-automation \
+            azure.workload.identity/client-id="$AZURE_RUNTIME_CLIENT_ID" \
+            --overwrite
+
+          kubectl -n cloudguard label serviceaccount \
+            cloudguard-automation \
+            azure.workload.identity/use=true \
+            --overwrite
+
+          echo "CloudGuard Workload Identity ServiceAccount configured."
+
+      # ------------------------------------------------------------
+      # 16. Apply CloudGuard namespace-level Kubernetes RBAC
+      # ------------------------------------------------------------
+      - name: Apply CloudGuard Kubernetes RBAC
+        run: |
+          set -euo pipefail
+
           kubectl apply -f k8s/job-rbac.yaml
-          kubectl delete job cloudguard-migrations -n cloudguard --ignore-not-found
-          sed "s#YOUR_REGISTRY/cloudguard:VERSION#$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA#g" k8s/migration-job.yaml | kubectl apply -f -
-          kubectl -n cloudguard wait --for=condition=complete job/cloudguard-migrations --timeout=180s
-          kubectl apply -f k8s/api-deployment.yaml
-          kubectl apply -f k8s/scan-cronjob.yaml
-          kubectl -n cloudguard set image deployment/cloudguard-api api="$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
-          kubectl -n cloudguard set image cronjob/cloudguard-scheduled-scan scheduled-scan="$ACR_LOGIN_SERVER/cloudguard:$GITHUB_SHA"
-          kubectl -n cloudguard rollout status deployment/cloudguard-api --timeout=180s
+
+      # ------------------------------------------------------------
+      # 17. Remove the previous migration Job
+      #
+      # Jobs cannot be updated in place because their pod templates
+      # are immutable.
+      # ------------------------------------------------------------
+      - name: Remove previous migration Job
+        run: |
+          set -euo pipefail
+
+          kubectl -n cloudguard delete job \
+            cloudguard-migrations \
+            --ignore-not-found=true
+
+      # ------------------------------------------------------------
+      # 18. Run Alembic migrations with the exact CI image
+      # ------------------------------------------------------------
+      - name: Run database migrations
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="${ACR_LOGIN_SERVER}/cloudguard:${IMAGE_TAG}"
+
+          echo "Running migrations with image: $IMAGE"
+
+          sed \
+            "s#YOUR_REGISTRY/cloudguard:VERSION#${IMAGE}#g" \
+            k8s/migration-job.yaml | kubectl apply -f -
+
+          if ! kubectl -n cloudguard wait \
+            --for=condition=complete \
+            job/cloudguard-migrations \
+            --timeout=300s; then
+
+            echo "Migration Job failed or timed out."
+
+            kubectl -n cloudguard get jobs || true
+            kubectl -n cloudguard get pods -o wide || true
+            kubectl -n cloudguard describe job cloudguard-migrations || true
+
+            MIGRATION_POD=$(kubectl -n cloudguard get pods \
+              -l job-name=cloudguard-migrations \
+              -o jsonpath='{.items[0].metadata.name}' \
+              2>/dev/null || true)
+
+            if [ -n "$MIGRATION_POD" ]; then
+              kubectl -n cloudguard describe pod "$MIGRATION_POD" || true
+              kubectl -n cloudguard logs "$MIGRATION_POD" \
+                --all-containers=true \
+                --tail=200 || true
+            fi
+
+            exit 1
+          fi
+
+          echo "Database migrations completed successfully."
+
+          kubectl -n cloudguard logs \
+            job/cloudguard-migrations \
+            --all-containers=true
+
+      # ------------------------------------------------------------
+      # 19. Deploy CloudGuard API with the exact CI image
+      # ------------------------------------------------------------
+      - name: Deploy CloudGuard API
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="${ACR_LOGIN_SERVER}/cloudguard:${IMAGE_TAG}"
+
+          echo "Deploying API image: $IMAGE"
+
+          sed \
+            "s#YOUR_REGISTRY/cloudguard:VERSION#${IMAGE}#g" \
+            k8s/api-deployment.yaml | kubectl apply -f -
+
+      # ------------------------------------------------------------
+      # 20. Deploy CloudGuard scheduled scan with the CI image
+      # ------------------------------------------------------------
+      - name: Deploy CloudGuard scheduled scan
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="${ACR_LOGIN_SERVER}/cloudguard:${IMAGE_TAG}"
+
+          echo "Deploying CronJob image: $IMAGE"
+
+          sed \
+            "s#YOUR_REGISTRY/cloudguard:VERSION#${IMAGE}#g" \
+            k8s/scan-cronjob.yaml | kubectl apply -f -
+
+      # ------------------------------------------------------------
+      # 21. Wait for the CloudGuard API rollout
+      # ------------------------------------------------------------
+      - name: Verify CloudGuard API rollout
+        run: |
+          set -euo pipefail
+
+          if ! kubectl -n cloudguard rollout status \
+            deployment/cloudguard-api \
+            --timeout=300s; then
+
+            echo "CloudGuard API rollout failed."
+
+            kubectl -n cloudguard get pods -o wide || true
+            kubectl -n cloudguard describe deployment cloudguard-api || true
+
+            API_POD=$(kubectl -n cloudguard get pods \
+              -l app=cloudguard-api \
+              -o jsonpath='{.items[0].metadata.name}' \
+              2>/dev/null || true)
+
+            if [ -n "$API_POD" ]; then
+              kubectl -n cloudguard describe pod "$API_POD" || true
+              kubectl -n cloudguard logs "$API_POD" \
+                --all-containers=true \
+                --tail=200 || true
+            fi
+
+            exit 1
+          fi
+
+          echo "CloudGuard API rollout completed successfully."
+
+      # ------------------------------------------------------------
+      # 22. Verify the API health endpoint inside Kubernetes
+      # ------------------------------------------------------------
+      - name: Verify CloudGuard API health
+        run: |
+          set -euo pipefail
+
+          kubectl -n cloudguard delete pod \
+            cloudguard-health-check \
+            --ignore-not-found=true
+
+          kubectl -n cloudguard run cloudguard-health-check \
+            --image=curlimages/curl:8.10.1 \
+            --restart=Never \
+            --command -- \
+            curl \
+              --fail \
+              --show-error \
+              --silent \
+              --retry 10 \
+              --retry-delay 5 \
+              http://cloudguard-api/api/v1/health
+
+          if ! kubectl -n cloudguard wait \
+            --for=jsonpath='{.status.phase}'=Succeeded \
+            pod/cloudguard-health-check \
+            --timeout=180s; then
+
+            echo "CloudGuard API health check failed."
+
+            kubectl -n cloudguard describe pod cloudguard-health-check || true
+            kubectl -n cloudguard logs cloudguard-health-check || true
+
+            exit 1
+          fi
+
+          kubectl -n cloudguard logs cloudguard-health-check
+
+          kubectl -n cloudguard delete pod \
+            cloudguard-health-check \
+            --ignore-not-found=true
+
+          echo "CloudGuard API health check passed."
+
+      # ------------------------------------------------------------
+      # 23. Display the final deployment state
+      # ------------------------------------------------------------
+      - name: Display deployment status
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          echo "=================================================="
+          echo "CloudGuard deployment completed"
+          echo "=================================================="
+          echo "CI Run ID:"
+          echo "${{ github.event.workflow_run.id }}"
+          echo
+          echo "Image:"
+          echo "${ACR_LOGIN_SERVER}/cloudguard:${IMAGE_TAG}"
+          echo
+
+          echo "Nodes:"
+          kubectl get nodes -o wide
+          echo
+
+          echo "Pods:"
+          kubectl -n cloudguard get pods -o wide
+          echo
+
+          echo "Deployments:"
+          kubectl -n cloudguard get deployments
+          echo
+
+          echo "StatefulSets:"
+          kubectl -n cloudguard get statefulsets
+          echo
+
+          echo "Services:"
+          kubectl -n cloudguard get services
+          echo
+
+          echo "Persistent Volume Claims:"
+          kubectl -n cloudguard get pvc
+          echo
+
+          echo "CronJobs:"
+          kubectl -n cloudguard get cronjobs
+          echo
+
+          echo "Jobs:"
+          kubectl -n cloudguard get jobs
