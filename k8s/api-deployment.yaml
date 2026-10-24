@@ -5,6 +5,7 @@ metadata:
   namespace: cloudguard
   labels:
     app: cloudguard-api
+
 spec:
   replicas: 1
 
@@ -38,12 +39,17 @@ spec:
 
       containers:
         - name: api
+
+          # CD replaces this placeholder with:
+          # cloudguardacr2026.azurecr.io/cloudguard:<CI-SHA>
           image: YOUR_REGISTRY/cloudguard:VERSION
+
           imagePullPolicy: IfNotPresent
 
           ports:
             - name: http
               containerPort: 8000
+              protocol: TCP
 
           envFrom:
             - secretRef:
@@ -89,13 +95,15 @@ metadata:
   namespace: cloudguard
   labels:
     app: cloudguard-api
+
 spec:
-  type: ClusterIP
+  type: LoadBalancer
 
   selector:
     app: cloudguard-api
 
   ports:
     - name: http
+      protocol: TCP
       port: 80
       targetPort: 8000
